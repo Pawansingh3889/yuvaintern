@@ -1,6 +1,8 @@
 # YuvaIntern: cosmetic recall analysis
 
-Problem: connect a specific cosmetic product and batch to an applicable official recall and its consumer guidance.
+Main problem: connect a specific cosmetic product and batch to an applicable official recall and its consumer guidance.
+
+Second, exploratory question: could dated customer complaints (unusual smell, irritation, texture change) have pointed to a product before its recall? This question is gated. It is only pursued beyond a single case study if enough recalled products have dated reviews written before the recall. See "Review signal question" below.
 
 Open `cosmetic_recall_analysis.ipynb` in Jupyter and choose Run > Run All Cells.
 The notebook uses the installed Anaconda Python kernel. It inspects French cosmetic recall records and UK aggregate product safety tables, then checks feasibility against an independent Open Beauty Facts catalogue. It compares word and character TF-IDF retrieval, displays errors, tests unsupported suggestions for other product identities, and checks one source-reviewed batch example. Semantic AI matching is a later research step that needs reviewed labels and a fresh evaluation set.
@@ -19,6 +21,30 @@ The verified catalogue contains 64,237 records. Accepted barcode identities over
 
 Both methods rank an older 300 ml Activilong recall above the barcode-linked 250 ml recall. The official records have different barcodes and batches. This gives the study a concrete focus: distinguish variants, preserve batch conditions and display uncertainty. Narrow the project to data quality, matching errors and reviewed batch interpretation while expanding independently reviewed examples. Package size is a feature to test next, not an improvement already established.
 
+## Review signal question
+
+Why ask it: Health Canada's 2025 recall of amika Mirrorball shampoo records 48 reports of foul odour and two reports of irritation or allergic reaction received by the company. Complaints of that kind may be visible in customer feedback before a notice is published. A review pattern would be a prompt for investigation. It is not evidence that a product is unsafe.
+
+What the test needs: reviews with dates, for products that were later recalled, written before the notice was published, plus comparable products that were not recalled.
+
+Candidate sources checked on 2 October 2026:
+
+| Source | What it holds | Limits for this project |
+|---|---|---|
+| [Amazon Reviews 2023](https://amazon-reviews-2023.github.io/) (McAuley Lab) | Beauty_and_Personal_Care: 23.9M ratings on 1.0M items. All_Beauty: 701.5K ratings on 112.6K items. Review timestamp, `parent_asin`, and item title, store and details. May 1996 to September 2023. | Not yet downloaded or measured. The project page states no licence and no marketplace. Ends before any recall published after September 2023. |
+| [openFDA cosmetic adverse events](https://open.fda.gov/apis/cosmetic/event) | 85,511 reports with received date, free-text product names and reaction terms. | Reports sent to the US regulator, not reviews. A report is not proof the product caused the reaction. Product names are unstandardised. |
+| [Sephora Products and Skincare Reviews](https://www.kaggle.com/datasets/nadyinky/sephora-products-and-skincare-reviews) (Kaggle) | 8,494 products; dated skincare reviews. The largest review file runs from 2008 to March 2023. | US retailer. No brand in common with the French notices (see below). |
+| Open French-language reviews for products in RappelConso | None found. | Paid scrapers exist. They are not used here because of site terms and cost. |
+
+First probe, run outside the notebook on files from the earlier work, exact brand-name matching only, not reviewed:
+
+- 173 distinct brand names appear in the 296 French cosmetic notices.
+- Sephora product list: 0 of 173 brands match.
+- openFDA product names: 12 of 173 brands appear, and some are ordinary words (for example "essence"). A brand match is not a product match.
+- openFDA holds two reports naming amika products and none naming Mirrorball.
+
+What this means: with the data in hand, the French notices cannot be used to test review signals. Week 2 measures product-level overlap between recalled products and Amazon Reviews 2023. If fewer than 20 recalled products have reviews dated before their notice, the question is reported as a single case study and matching stays the only evaluated contribution. Twenty is a planning threshold, not a power calculation.
+
 ## Sources
 
 - France: https://www.data.gouv.fr/datasets/rappelconso-v2-rappels-de-produits
@@ -28,13 +54,13 @@ Both methods rank an older 300 ml Activilong recall above the barcode-linked 250
 
 Open Beauty Facts is citizen-contributed data under ODbL. Its attribution and share-alike conditions apply to reuse. French recall data is published under the Open Licence. Review combined-dataset publication terms before redistributing joined records. The catalogue download record is in `data/raw/openbeautyfacts-download.json`.
 
-Original downloads are copied unchanged to `data/raw`. This is a historical snapshot. A missing match does not establish safety. UK and French counts have different definitions and must not be pooled.
+Original downloads are copied unchanged to `data/raw`, which is excluded from Git. After cloning, download the files from the sources above into `data/raw` before running the notebook. This is a historical snapshot. A missing match does not establish safety. UK and French counts have different definitions and must not be pooled.
 
 ## Submission structure
 
 `submissions/week_01` through `submissions/week_06` hold the weekly Word reports when prepared.
 
-Week 1 is prepared in `submissions/week_01/Week_01_Cosmetic_Recall_Problem_Definition.docx` with its 278-word submission text in `submissions/week_01/Submission_Description.txt`. The report includes industry and academic references, four hypotheses, feasibility findings, variables, a validation plan, the six-week roadmap and a STAR summary. Later weekly reports will follow the same problem.
+Week 1 is prepared in `submissions/week_01/Week_01_Cosmetic_Recall_Problem_Definition.docx` with its 300-word submission text in `submissions/week_01/Submission_Description.txt`. The report includes industry and academic references, four hypotheses, one gated exploratory question on review signals, feasibility findings, variables, a validation plan, the six-week roadmap and a STAR summary. Later weekly reports will follow the same problem.
 
 ## Previous work
 
