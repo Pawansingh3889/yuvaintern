@@ -1,8 +1,12 @@
-# YuvaIntern: cosmetic recall analysis
+# YuvaIntern: cosmetic safety complaint detection
 
-Main problem: connect a specific cosmetic product and batch to an applicable official recall and its consumer guidance.
+Main problem: detect genuine safety complaints (skin reactions, spoilage, contamination) in online beauty reviews early enough for a person to investigate them. See `roadmap.md` for the six-week plan and `docs/week_01/` for the Week 1 research proposal.
 
-Second, exploratory question: could dated customer complaints (unusual smell, irritation, texture change) have pointed to a product before its recall? This question is gated. It is only pursued beyond a single case study if enough recalled products have dated reviews written before the recall. See "Review signal question" below.
+Exploratory questions: whether complaint rates rise before a recall, and whether a flagged product can be traced to the correct official recall record. The recall-matching notebook described below is earlier scoping work for the second of these.
+
+Supporting files: `dataset_sources.md` (every source with link, licence and limits), `references.md` (APA 7 list) and `research_feasibility_matrix.md` (what the data can and cannot support).
+
+## Earlier scoping: recall matching notebook
 
 Open `cosmetic_recall_analysis.ipynb` in Jupyter and choose Run > Run All Cells.
 The notebook uses the installed Anaconda Python kernel. It inspects French cosmetic recall records and UK aggregate product safety tables, then checks feasibility against an independent Open Beauty Facts catalogue. It compares word and character TF-IDF retrieval, displays errors, tests unsupported suggestions for other product identities, and checks one source-reviewed batch example. Semantic AI matching is a later research step that needs reviewed labels and a fresh evaluation set.
@@ -58,9 +62,9 @@ Original downloads are copied unchanged to `data/raw`, which is excluded from Gi
 
 ## Submission structure
 
-`submissions/week_01` through `submissions/week_06` hold the weekly Word reports when prepared.
+`docs/week_01` through `docs/week_06` hold the weekly Word reports when prepared.
 
-Week 1 is prepared in `submissions/week_01/Week_01_Cosmetic_Recall_Problem_Definition.docx` with its 300-word submission text in `submissions/week_01/Submission_Description.txt`. The report includes industry and academic references, four hypotheses, one gated exploratory question on review signals, feasibility findings, variables, a validation plan, the six-week roadmap and a STAR summary. Later weekly reports will follow the same problem.
+Week 1 is `docs/week_01/Week_01_Cosmetic_Safety_Complaint_Detection.docx`, with its submission text in `docs/week_01/week_01_submission_description.md`. It replaces an earlier Week 1 report on recall matching, which remains in the Git history.
 
 ## Previous work
 
