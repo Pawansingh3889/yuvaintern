@@ -19,6 +19,9 @@ Research questions: RQ1 annotation reliability, RQ2 complaint detection, RQ3 wea
 | 9 | EU Safety Gate 2025 report | European Commission | Context | Read online |
 | 10 | UK Product Safety Database reports | Office for Product Safety and Standards | Context | Downloaded |
 | 11 | Sephora Products and Skincare Reviews | Kaggle contributor | Rejected | In local archive |
+| 12 | Reddit Data API (skincare and makeup communities) | Reddit, Inc. | Rejected | Not downloaded |
+| 13 | YouTube Data API v3 (comments on beauty videos) | Google | Rejected | Not downloaded |
+| 14 | SaferProducts.gov API | U.S. Consumer Product Safety Commission | Rejected | Not downloaded |
 
 ## Primary source
 
@@ -160,6 +163,24 @@ Aggregate tables. Definitions differ from EU and French counts, so the figures a
 https://www.kaggle.com/datasets/nadyinky/sephora-products-and-skincare-reviews
 
 8,494 products with dated skincare reviews to March 2023. None of the 173 brand names in the French recall notices appears in its product list, and it is smaller than source 1 for the same market. Kept only as a documented negative result.
+
+### 12. Reddit Data API
+
+https://www.reddit.com/dev/api/
+
+Posts and comments from skincare and makeup communities, through an API that needs a registered account. First-person accounts of reactions are detailed and current. Rejected because a post has no product identifier and no star rating, the product is named only in free text, and the API terms limit storing and modelling the text. Assessed in Week 2 from the documentation; nothing was downloaded.
+
+### 13. YouTube Data API v3
+
+https://developers.google.com/youtube/v3/docs/commentThreads/list
+
+Comment threads on beauty videos, through an API key with a default quota of 10,000 units a day. Rejected because comments respond to the video, not to a purchase, and carry no product identifier. Nothing was downloaded.
+
+### 14. SaferProducts.gov API
+
+https://catalog.data.gov/dataset/saferproducts-api
+
+Published consumer incident reports held by the U.S. Consumer Product Safety Commission. Official and dated, but cosmetics are regulated by the FDA, not the CPSC, so the database holds personal care appliances such as hair dryers and not creams or shampoos. Nothing was downloaded.
 
 ## Where the files are
 
