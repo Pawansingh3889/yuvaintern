@@ -11,6 +11,10 @@ __pycache__/
 roadmap.md
 references.md
 research_feasibility_matrix.md
-data/labels/
+data/labels/*
+!data/labels/annotation_guideline.md
 docs/week1_audit/
 docs/week_*/*.md
+
+# local copy of the report generator (npm docx); not published
+docs/week_02/_generator/

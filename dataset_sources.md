@@ -1,6 +1,6 @@
 # Dataset sources
 
-Every source considered for the project, with its official link, what it is for, and its limits. Sizes are as observed on the date in the "Checked" column. This file supports the Week 1 report and is the starting point for the Week 2 source register.
+Every source considered for the project, with its official link, what it is for, and its limits. Sizes are as observed on the date in the "Checked" column. This file supports the Week 1 report. The Week 2 report adds sources found in its own dated search (its Appendix B), and this file was extended to match on 14 October 2026.
 
 Research questions: RQ1 annotation reliability, RQ2 complaint detection, RQ3 weak supervision, RQ4 early signal before recall (exploratory), RQ5 traceability to official records (exploratory).
 
@@ -22,6 +22,12 @@ Research questions: RQ1 annotation reliability, RQ2 complaint detection, RQ3 wea
 | 12 | Reddit Data API (skincare and makeup communities) | Reddit, Inc. | Rejected | Not downloaded |
 | 13 | YouTube Data API v3 (comments on beauty videos) | Google | Rejected | Not downloaded |
 | 14 | SaferProducts.gov API | U.S. Consumer Product Safety Commission | Rejected | Not downloaded |
+| 15 | Amazon Reviews 2023, All_Beauty (Hugging Face mirror) | Hugging Face contributor (jhan21) | Pipeline tests (replica) | Downloaded (232 MB; licence tags conflict) |
+| 16 | TikTok Beauty Brand Engagement Dataset | Octoparse (Kaggle) | Assessed (context) | Not downloaded (account) |
+| 17 | NLP: Ulta Skincare Reviews | Kaggle contributor (nenamalikah) | Assessed (rejected) | Not downloaded (account) |
+| 18 | SkincareAddiction_reddit mirror | Hugging Face contributor (DataDump1) | Assessed (rejected) | Not downloaded (gated) |
+| 19 | Makeup API | Not stated | Assessed (context) | Not downloaded (API) |
+| 20 | CosIng cosmetic ingredient database | European Commission (DG GROW) | Context (ingredient vocabulary) | Not downloaded |
 
 ## Primary source
 
@@ -188,3 +194,44 @@ Published consumer incident reports held by the U.S. Consumer Product Safety Com
 - `data/raw/amazon_reviews_2023/`, `data/raw/health_canada/` and `data/raw/openfda/` hold the files used by `complaint_detection.ipynb`.
 - `data/raw/download_records.json` holds the link, size, file time and SHA-256 hash of each file.
 - The Sephora files are in the local archive outside the repository.
+- `data/raw/hf_amazon_beauty_mirror/` holds the third-party All_Beauty re-upload used for pipeline tests (Week 2 report Section 6.8); its SHA-256 is in `download_records.json`.
+
+## Added in the Week 2 search (14 October 2026)
+
+Every entry below was opened at its official page on 14 October 2026; the full search log is Appendix B of the Week 2 report and the link statuses are in `docs/week_02/LINK_CHECK.md`.
+
+### 15. Amazon Reviews 2023, All_Beauty (Hugging Face mirror)
+
+https://huggingface.co/datasets/jhan21/amazon-beauty-reviews-dataset
+
+Third-party re-upload; the dataset metadata says CC0 while the card text says CC BY-SA 4.0, and the upstream Amazon Reviews 2023 release states no licence, so the re-uploader cannot grant rights: the file is used under the same research-only, never-redistributed terms as source 1. Direct download, no account. One customer review per row; 701,528 reviews of 112,565 products, November 2000 to September 2023; same schema as source 1, and the card names the All Beauty category. None of its 112,565 products appears in the Beauty and Personal Care catalogue, so it is a different category; kept for pipeline tests, not for the core sample. User identifiers are present in the file and never exported.
+
+### 16. TikTok Beauty Brand Engagement Dataset (Kaggle)
+
+https://www.kaggle.com/datasets/octoparsedataservice/tiktok-brand-monitoring-beauty-sample
+
+CC BY-SA 4.0; download needs a Kaggle account; static, May 2026. A small vendor sample of video-level engagement and comment-level records for beauty brands. No product identifiers and no sampling documentation, so it is logged as a social-media extension candidate rather than a study source.
+
+### 17. NLP: Ulta Skincare Reviews (Kaggle)
+
+https://www.kaggle.com/datasets/nenamalikah/nlp-ulta-skincare-reviews
+
+CC BY 4.0 as stated on Kaggle; download needs an account; static, March 2023. About 4,000 English reviews of one brand (Dermalogica) collected with a scraper. Rejected for the core study: single brand, and the underlying site terms were not verified.
+
+### 18. SkincareAddiction_reddit mirror (Hugging Face)
+
+https://huggingface.co/datasets/DataDump1/SkincareAddiction_reddit
+
+Gated access request; no licence stated; static, April 2025. Would provide first-person reaction language, but the licence cannot be verified and no product identifier is documented. Rejected.
+
+### 19. Makeup API
+
+http://makeup-api.herokuapp.com/
+
+Live public JSON API (verified with a query: 7 Maybelline lipstick records; fields include brand, product type, price, description). No owner, licence or update schedule is stated and the records carry no product identifiers or reviews. Context only.
+
+### 20. CosIng cosmetic ingredient database
+
+https://ec.europa.eu/growth/tools-databases/cosing/
+
+Official EU ingredient database (DG GROW). Web interface only; no public bulk API or download was found on the check date. Ingredient-level, no products or reviews. Recorded as ingredient vocabulary for future work, not used in the study.
