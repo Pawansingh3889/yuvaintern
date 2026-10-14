@@ -6,3 +6,11 @@ __pycache__/
 .env
 .DS_Store
 ~$*
+
+# planning and working notes kept on the local machine only
+roadmap.md
+references.md
+research_feasibility_matrix.md
+data/labels/
+docs/week1_audit/
+docs/week_*/*.md

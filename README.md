@@ -1,10 +1,10 @@
 # YuvaIntern: cosmetic safety complaint detection
 
-Main problem: detect genuine safety complaints (skin reactions, spoilage, contamination) in online beauty reviews early enough for a person to investigate them. See `roadmap.md` for the six-week plan and `docs/week_01/` for the Week 1 research proposal.
+Main problem: detect genuine safety complaints (skin reactions, spoilage, contamination) in online beauty reviews early enough for a person to investigate them. See `docs/week_01/` for the Week 1 research proposal and `docs/week_02/` for the Week 2 data sourcing strategy. Every number in the Week 2 report is produced by `complaint_detection.ipynb`.
 
 Exploratory questions: whether complaint rates rise before a recall, and whether a flagged product can be traced to the correct official recall record. The recall-matching notebook described below is earlier scoping work for the second of these.
 
-Supporting files: `dataset_sources.md` (every source with link, licence and limits), `references.md` (APA 7 list) and `research_feasibility_matrix.md` (what the data can and cannot support).
+Supporting file: `dataset_sources.md` (every source with link, licence and limits). Each report carries its own reference list.
 
 ## Earlier scoping: recall matching notebook
 
@@ -64,7 +64,7 @@ Original downloads are copied unchanged to `data/raw`, which is excluded from Gi
 
 `docs/week_01` through `docs/week_06` hold the weekly Word reports when prepared.
 
-Week 1 is `docs/week_01/Week_01_Cosmetic_Safety_Complaint_Detection.docx`, with its submission text in `docs/week_01/week_01_submission_description.md`. It replaces an earlier Week 1 report on recall matching, which remains in the Git history.
+Week 1 is `docs/week_01/Week_01_Cosmetic_Safety_Complaint_Detection.docx`. It replaces an earlier Week 1 report on recall matching, which remains in the Git history.
 
 ## Previous work
 
