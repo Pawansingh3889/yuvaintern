@@ -80,6 +80,108 @@ def test_duplicates_and_conflicting_review_keys(reviews):
     assert df["repeated_review_key"].sum() == 2
 
 
+def test_duplicate_identity_keeps_independent_reviewers(reviews):
+    first = prepared(reviews).iloc[[0]]
+    other = first.assign(user_id="independent-reviewer")
+    copy = first.assign(timestamp=first["timestamp"] + 1000)
+    out = c.remove_duplicates(pd.concat([first, other, copy], ignore_index=True))
+    assert out["user_id"].tolist() == ["person1", "independent-reviewer"]
+    assert out["dup_same_text_other_reviewer"].all()
+
+
+def test_numeric_scaling_and_reusable_parameters():
+    df = pd.DataFrame(
+        {"helpful_vote": [0, 1, 3, 7, 1000], "word_count": [0, 2, 4, 6, 8]}
+    )
+    out = c.normalise_numeric(df)
+    for source, name in (("helpful_vote", "helpful"), ("word_count", "word_count")):
+        values = np.log1p(df[source])
+        assert out[f"{name}_log1p"].tolist() == pytest.approx(values.tolist())
+        assert out[f"{name}_robust"].median() == pytest.approx(0)
+        assert out[f"{name}_robust"].quantile(0.75) - out[f"{name}_robust"].quantile(
+            0.25
+        ) == pytest.approx(1)
+    parameters = {name: {"median": 2, "scale": 3} for name in ("helpful", "word_count")}
+    reused = c.normalise_numeric(df.iloc[[0]], parameters)
+    assert reused["helpful_robust"].item() == pytest.approx(-2 / 3)
+    constant = c.normalise_numeric(
+        pd.DataFrame({"helpful_vote": [0, 0], "word_count": [3, 3]})
+    )
+    assert constant[["helpful_robust", "word_count_robust"]].eq(0).all().all()
+    parameters["helpful"]["scale"] = 0
+    with pytest.raises(ValueError, match="Invalid numeric scaling"):
+        c.normalise_numeric(df, parameters)
+
+
+def test_language_sampling_is_stratified_seeded_and_weighted(monkeypatch):
+    # Unequal class sizes ensure the overall recall uses population weights.
+    frame = pd.DataFrame(
+        {
+            "text": ["english example words"] * 18000
+            + ["foreign example words"] * 3000
+            + ["ambiguous example words"] * 1000
+            + ["too short"],
+            "language": ["likely_en"] * 18000
+            + ["likely_non_en"] * 3000
+            + ["unknown"] * 1001,
+            "word_count": [3] * 22000 + [2],
+        }
+    )
+    monkeypatch.setattr(
+        c, "detect", lambda text: "en" if text.startswith("english") else "es"
+    )
+    results = []
+    for chunksize in [100, len(frame)]:
+        samples, populations = {}, {}
+        rng = np.random.default_rng(42)
+        for start in range(0, len(frame), chunksize):
+            c._sample_language(
+                frame.iloc[start : start + chunksize], samples, populations, rng
+            )
+        agreement, result = c.validate_language(samples, populations, 42)
+        assert agreement["sample_size"].sum() == 20000
+        assert (
+            agreement.set_index("heuristic_class").loc["likely_non_en", "sample_size"]
+            >= 2000
+        )
+        assert (
+            agreement.set_index("heuristic_class").loc["unknown", "sample_size"] == 1000
+        )
+        assert result["precision"] == 1
+        assert result["recall"] == pytest.approx(0.75)
+        assert result["poor_agreement"]
+        results.append(agreement)
+    pd.testing.assert_frame_equal(*results)
+    agreement, result = c.validate_language({}, {}, 42)
+    assert agreement.empty and result["sample_size"] == 0
+    assert result["precision"] is None and result["recall"] is None
+
+
+def test_language_reference_failure_and_threshold_adjustment(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            "text": ["This is a sentence", "el producto is muy bueno", "123 456 789"],
+            "word_count": 3,
+        }
+    )
+    initial = c.identify_language(frame)
+    adjusted = c.identify_language(frame, c.ADJUSTED_LANGUAGE_THRESHOLDS)
+    assert initial.loc[1, "language"] == "likely_non_en"
+    assert adjusted.loc[0, "language"] == "likely_en"
+
+    def detector(text):
+        if text.startswith("123"):
+            raise c.LangDetectException(0, "No language features")
+        return "en"
+
+    monkeypatch.setattr(c, "detect", detector)
+    samples, populations = {}, {}
+    c._sample_language(initial, samples, populations, np.random.default_rng(42))
+    _, result = c.validate_language(samples, populations, 42)
+    assert result["undetected"] == 1
+    assert result["poor_agreement"]
+
+
 def test_outlier_rules_retain_extremes(reviews):
     df = prepared(reviews)
     df.loc[0, "timestamp"] = 0
@@ -185,10 +287,12 @@ def test_histogram_quantiles_match_numpy():
 
 
 @pytest.mark.parametrize("parquet", [True, False])
+@pytest.mark.parametrize("adjusted", [False, True])
 def test_stream_is_independent_of_chunk_boundaries(
-    tmp_path, reviews, monkeypatch, parquet
+    tmp_path, reviews, monkeypatch, parquet, adjusted
 ):
     monkeypatch.setenv("CLEANING_SALT", "synthetic-test-secret-123456789012")
+    monkeypatch.setattr(c, "detect", lambda text: "es" if adjusted else "en")
     real_find = c.importlib.util.find_spec
     if not parquet:
         monkeypatch.setattr(
@@ -201,6 +305,7 @@ def test_stream_is_independent_of_chunk_boundaries(
             reviews,
             reviews.iloc[[0]],
             reviews.iloc[[0]].assign(parent_asin="B", user_id="different"),
+            reviews.iloc[[0]].assign(user_id="independent"),
             reviews.iloc[[0]].assign(
                 text="Conflicting review content for the same key"
             ),
@@ -227,7 +332,7 @@ def test_stream_is_independent_of_chunk_boundaries(
         directory = tmp_path / str(chunksize)
         log = c.run(path, directory, chunksize)
         assert log["step"].tolist() == c.STEPS
-        assert log.loc[log["step"].eq("duplicates"), "rows_out"].item() == 5
+        assert log.loc[log["step"].eq("duplicates"), "rows_out"].item() == 6
         files = sorted((directory / "cleaned").iterdir())
         output = pd.concat(
             [
@@ -238,10 +343,33 @@ def test_stream_is_independent_of_chunk_boundaries(
         )
         outputs.append(output)
         assert "user_id" not in output
-        assert output["dup_cross_product"].sum() == 2
+        assert output["dup_cross_product"].sum() == 3
+        assert output["dup_same_text_other_reviewer"].sum() == 2
         assert output["repeated_review_key"].sum() == 2
         metrics = json.loads((directory / "cleaning_metrics.json").read_text())
         assert metrics["review_key_audit"]["groups_with_different_content"] == 1
+        assert metrics["removed_exact_duplicates"] == 1
+        assert metrics["deduplication_audit"]["old_rule_removed_rows"] == 2
+        assert metrics["deduplication_audit"]["old_rule_other_reviewer_rows"] == 1
+        assert metrics["deduplication_audit"]["independent_reviews_preserved"] == 1
+        for source, name in (("helpful_vote", "helpful"), ("word_count", "word_count")):
+            scaling = metrics["numeric_scaling"][name]
+            assert scaling["median"] == pytest.approx(np.log1p(output[source]).median())
+            assert output[f"{name}_robust"].tolist() == pytest.approx(
+                (
+                    (np.log1p(output[source]) - scaling["median"]) / scaling["scale"]
+                ).tolist()
+            )
+        agreement = pd.read_csv(directory / "language_validation.csv")
+        assert agreement["seed"].nunique() == (2 if adjusted else 1)
+        assert (
+            agreement.groupby("seed")["sample_size"]
+            .sum()
+            .eq(output["word_count"].ge(3).sum())
+            .all()
+        )
+        expected_language = c.identify_language(output, metrics["language_thresholds"])
+        assert output["language"].equals(expected_language["language"])
         assert not list(directory.glob(".cleaning-work-*"))
     for output in outputs[1:]:
         pd.testing.assert_frame_equal(outputs[0], output)

@@ -19,6 +19,8 @@ from html import unescape
 
 import numpy as np
 import pandas as pd
+from langdetect import DetectorFactory, detect
+from langdetect.lang_detect_exception import LangDetectException
 
 
 REQUIRED = {
@@ -34,6 +36,20 @@ REQUIRED = {
 WINDOW_START = pd.Timestamp("1996-05-01", tz="UTC")
 WINDOW_END = pd.Timestamp("2023-10-01", tz="UTC")
 BURST_THRESHOLD = 10
+LANGUAGE_SAMPLE_SIZE = 20000
+LANGUAGE_MIN_CLASS = 2000
+LANGUAGE_THRESHOLDS = {
+    "non_ascii_ratio": 0.5,
+    "other_min": 2,
+    "english_max": 2,
+    "english_min": 1,
+}
+ADJUSTED_LANGUAGE_THRESHOLDS = {
+    "non_ascii_ratio": 0.7,
+    "other_min": 2,
+    "english_max": 3,
+    "english_min": 2,
+}
 ENGLISH = r"(?i)\b(?:the|and|is|it|this|that|with|for|my|was|not|no|very|have|but|of|to|a|i|on|in|great|good|love|nice|works|perfect|excellent)\b"
 OTHER = r"(?i)\b(?:el|la|los|las|muy|pero|para|una|que|con|le|les|une|avec|pas|mais|est|der|die|das|und|nicht|ist|mit|nao|não|uma|muito|produto)\b"
 NEGATION = r"(?i)\b(?:no|not|never|without)\b|n['’]t\b"
@@ -48,6 +64,7 @@ STEPS = [
     "missing",
     "duplicates",
     "outliers",
+    "numeric_normalisation",
     "language",
     "utc_dates",
     "catalogue",
@@ -135,9 +152,20 @@ def _digest(parts):
     ).digest()
 
 
-def remove_duplicates(df, drop_rows=None, cross_texts=None, repeated_keys=None):
-    """Keep the first normalised product/title/text tuple; flag other repetition."""
+def remove_duplicates(
+    df, drop_rows=None, cross_texts=None, repeated_keys=None, other_reviewers=None
+):
+    """Remove only the same reviewer's product/title/text copies."""
     df = df.copy()
+    identity = ["user_id", "parent_asin", "title", "text"]
+    if other_reviewers is None:
+        df["dup_same_text_other_reviewer"] = (
+            df.groupby(["parent_asin", "title", "text"])["user_id"]
+            .transform("nunique")
+            .gt(1)
+        )
+    else:
+        df["dup_same_text_other_reviewer"] = df["_old_exact_hash"].isin(other_reviewers)
     if cross_texts is None:
         products = df.loc[df["text"].ne("")].groupby("text")["parent_asin"].nunique()
         df["dup_cross_product"] = df["text"].isin(products[products.gt(1)].index)
@@ -150,7 +178,7 @@ def remove_duplicates(df, drop_rows=None, cross_texts=None, repeated_keys=None):
     else:
         df["repeated_review_key"] = df["_key_hash"].isin(repeated_keys)
     if drop_rows is None:
-        return df.drop_duplicates(["parent_asin", "title", "text"], keep="first")
+        return df.drop_duplicates(identity, keep="first")
     return df.loc[~df["_row_id"].isin(drop_rows)].copy()
 
 
@@ -181,8 +209,28 @@ def flag_outliers(df, limits=None, burst_days=None):
     return df
 
 
-def identify_language(df):
-    """A transparent proxy, not a validated language detector or exclusion rule."""
+def normalise_numeric(df, parameters=None):
+    """Log-transform and robust-scale counts, retaining the original fields."""
+    df = df.copy()
+    for source, feature in (("helpful_vote", "helpful"), ("word_count", "word_count")):
+        values = np.log1p(df[source])
+        df[f"{feature}_log1p"] = values
+        if parameters is None:
+            q1, median, q3 = values.quantile([0.25, 0.5, 0.75])
+            center, scale = median, (q3 - q1) or 1.0
+        else:
+            center = parameters[feature]["median"]
+            scale = parameters[feature]["scale"]
+        if not np.isfinite(center) or not np.isfinite(scale) or scale <= 0:
+            raise ValueError(f"Invalid numeric scaling parameters: {feature}")
+        df[f"{feature}_robust"] = (values - center) / scale
+    return df
+
+
+def identify_language(df, thresholds=None):
+    """A screening proxy checked against a sampled reference, never a filter."""
+    if thresholds is None:
+        thresholds = LANGUAGE_THRESHOLDS
     df = df.copy()
     # Arrow's regex engine treats \w as ASCII; use Python for Unicode letters.
     letters = df["text"].astype(pd.StringDtype(storage="python")).str.count(r"[^\W\d_]")
@@ -194,16 +242,115 @@ def identify_language(df):
     df["language"] = "unknown"
     nonempty = letters.gt(0)
     nonenglish = nonempty & (
-        df["ascii_letter_ratio"].lt(0.5) | (other.ge(2) & english.lt(2))
+        df["ascii_letter_ratio"].lt(thresholds["non_ascii_ratio"])
+        | (other.ge(thresholds["other_min"]) & english.lt(thresholds["english_max"]))
     )
     english_like = (
-        nonempty & df["ascii_letter_ratio"].ge(0.9) & english.ge(1) & ~nonenglish
+        nonempty
+        & df["ascii_letter_ratio"].ge(0.9)
+        & english.ge(thresholds["english_min"])
+        & ~nonenglish
     )
     df.loc[english_like, "language"] = "likely_en"
     df.loc[nonenglish, "language"] = "likely_non_en"
     df["language_non_english"] = df["language"].eq("likely_non_en")
     df["language_unknown"] = df["language"].eq("unknown")
     return df
+
+
+def _sample_language(df, samples, populations, rng):
+    """Keep uniform random-priority reservoirs, with no review text on disk."""
+    candidates = df.loc[df["word_count"].ge(3), ["text", "language"]].copy()
+    candidates["_priority"] = rng.random(len(candidates))
+    for language, group in candidates.groupby("language"):
+        populations[language] = populations.get(language, 0) + len(group)
+        previous = samples.get(language)
+        combined = group if previous is None else pd.concat([previous, group])
+        samples[language] = combined.nsmallest(LANGUAGE_SAMPLE_SIZE, "_priority")
+
+
+def validate_language(samples, populations, seed):
+    """Stratified agreement with langdetect, weighted back to eligible reviews."""
+    DetectorFactory.seed = 0
+    target = min(LANGUAGE_SAMPLE_SIZE, sum(populations.values()))
+    allocations = {
+        name: min(LANGUAGE_MIN_CLASS, size) for name, size in populations.items()
+    }
+    remaining = target - sum(allocations.values())
+    capacity = {name: size - allocations[name] for name, size in populations.items()}
+    total_capacity = sum(capacity.values())
+    if remaining:
+        quotas = {
+            name: remaining * size / total_capacity for name, size in capacity.items()
+        }
+        for name, quota in quotas.items():
+            allocations[name] += int(quota)
+        for name in sorted(quotas, key=lambda x: quotas[x] % 1, reverse=True)[
+            : target - sum(allocations.values())
+        ]:
+            allocations[name] += 1
+    rows = []
+    true_positive = predicted_positive = reference_positive = 0.0
+    for language in sorted(populations):
+        sample = samples[language].nsmallest(allocations[language], "_priority")
+        counts = {"en": 0, "non_en": 0, "undetected": 0}
+        for text in sample["text"]:
+            try:
+                detected = "en" if detect(text) == "en" else "non_en"
+            except LangDetectException:
+                detected = "undetected"
+            counts[detected] += 1
+        size = len(sample)
+        weight = populations[language] / size
+        non_en = counts["non_en"] * weight
+        reference_positive += non_en
+        if language == "likely_non_en":
+            true_positive += non_en
+            predicted_positive += (size - counts["undetected"]) * weight
+        rows.append(
+            {
+                "seed": seed,
+                "heuristic_class": language,
+                "population": populations[language],
+                "sample_size": size,
+                **{f"langdetect_{name}": count for name, count in counts.items()},
+                **{f"share_{name}": count / size for name, count in counts.items()},
+            }
+        )
+    agreement = pd.DataFrame(
+        rows,
+        columns=[
+            "seed",
+            "heuristic_class",
+            "population",
+            "sample_size",
+            "langdetect_en",
+            "langdetect_non_en",
+            "langdetect_undetected",
+            "share_en",
+            "share_non_en",
+            "share_undetected",
+        ],
+    )
+    result = {
+        "seed": seed,
+        "detector_seed": 0,
+        "sample_size": int(agreement["sample_size"].sum()),
+        "eligible_rows": sum(populations.values()),
+        "precision": true_positive / predicted_positive if predicted_positive else None,
+        "recall": true_positive / reference_positive if reference_positive else None,
+        "undetected": int(agreement["langdetect_undetected"].sum()),
+    }
+    result["poor_agreement"] = any(
+        row[f"share_{reference}"] < threshold
+        for row in rows
+        for name, reference, threshold in (
+            ("likely_en", "en", 0.9),
+            ("likely_non_en", "non_en", 0.8),
+        )
+        if row["heuristic_class"] == name
+    ) or (result["recall"] is not None and result["recall"] < 0.8)
+    return agreement, result
 
 
 def derive_dates(df):
@@ -394,6 +541,7 @@ def run(path, out_dir, chunksize=100000):
                 "title": "str",
                 "text": "str",
                 "_text_hash": "str",
+                "_old_exact_hash": "str",
                 "_key_hash": "str",
                 "_day_hash": "str",
             },
@@ -424,7 +572,7 @@ def run(path, out_dir, chunksize=100000):
             db.execute("PRAGMA temp_store=FILE")
             db.execute("PRAGMA cache_size=-131072")
             db.execute(
-                "CREATE TABLE audit (id INTEGER PRIMARY KEY, exact BLOB, text_hash BLOB, parent TEXT, review_key BLOB, user_day BLOB, words INTEGER, votes INTEGER, rating INTEGER)"
+                "CREATE TABLE audit (id INTEGER PRIMARY KEY, exact BLOB, old_exact BLOB, text_hash BLOB, parent TEXT, review_key BLOB, user_day BLOB, words INTEGER, votes INTEGER, rating INTEGER)"
             )
             total = 0
             stage_files = []
@@ -470,6 +618,12 @@ def run(path, out_dir, chunksize=100000):
                 ].copy()
                 df["_row_id"] = np.arange(total, total + len(df))
                 exact = [
+                    _digest([u, p, title, text])
+                    for u, p, title, text in zip(
+                        df["user_id"], df["parent_asin"], df["title"], df["text"]
+                    )
+                ]
+                old_exact = [
                     _digest([p, title, text])
                     for p, title, text in zip(
                         df["parent_asin"], df["title"], df["text"]
@@ -495,10 +649,11 @@ def run(path, out_dir, chunksize=100000):
                     for u, t in zip(df["user_id"], df["timestamp"])
                 ]
                 db.executemany(
-                    "INSERT INTO audit VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO audit VALUES (?,?,?,?,?,?,?,?,?,?)",
                     zip(
                         df["_row_id"].tolist(),
                         exact,
+                        old_exact,
                         text_hash,
                         df["parent_asin"],
                         keys,
@@ -509,6 +664,7 @@ def run(path, out_dir, chunksize=100000):
                     ),
                 )
                 for name, hashes in (
+                    ("_old_exact_hash", old_exact),
                     ("_text_hash", text_hash),
                     ("_key_hash", keys),
                     ("_day_hash", days),
@@ -536,6 +692,23 @@ def run(path, out_dir, chunksize=100000):
                     "SELECT a.id FROM audit a LEFT JOIN kept_ids k ON a.id=k.id WHERE k.id IS NULL"
                 )
             }
+            print("Comparing reviewer-aware and previous duplicate rules", flush=True)
+            db.execute(
+                "CREATE TABLE old_groups AS SELECT old_exact, MIN(id) first_id, COUNT(*) n, COUNT(DISTINCT exact) reviewers FROM audit GROUP BY old_exact HAVING COUNT(*)>1"
+            )
+            old_removed, preserved = db.execute(
+                "SELECT COALESCE(SUM(n-1),0), COALESCE(SUM(reviewers-1),0) FROM old_groups"
+            ).fetchone()
+            other_reviewers = {
+                r[0].hex()
+                for r in db.execute(
+                    "SELECT old_exact FROM old_groups WHERE reviewers>1"
+                )
+            }
+            db.execute("CREATE INDEX old_group_hash ON old_groups(old_exact)")
+            other_reviewer_rows = db.execute(
+                "SELECT COUNT(*) FROM audit a JOIN old_groups g ON a.old_exact=g.old_exact JOIN audit first ON first.id=g.first_id WHERE g.reviewers>1 AND a.exact<>first.exact"
+            ).fetchone()[0]
             print("Finding cross-product repeated text", flush=True)
             cross_texts = {
                 r[0].hex()
@@ -576,6 +749,20 @@ def run(path, out_dir, chunksize=100000):
                 "length_upper": q3 + 1.5 * (q3 - q1),
                 "helpful_upper": _quantile(votes, 0.999),
             }
+            scaling = {}
+            for name, histogram in (("helpful", votes), ("word_count", lengths)):
+                q1, median, q3 = [
+                    _quantile(histogram, q, np.log1p) for q in (0.25, 0.5, 0.75)
+                ]
+                scaling[name] = {
+                    "transform": "log1p",
+                    "q1": q1,
+                    "median": median,
+                    "q3": q3,
+                    "iqr": q3 - q1,
+                    "scale": (q3 - q1) or 1.0,
+                    "zero_iqr": q3 == q1,
+                }
             print("Reading and normalising catalogue", flush=True)
             catalogue_parts = []
             for part in pd.read_json(
@@ -594,6 +781,12 @@ def run(path, out_dir, chunksize=100000):
             metrics = {
                 "input_rows": total,
                 "removed_exact_duplicates": len(drop_rows),
+                "deduplication_audit": {
+                    "key": ["user_id", "parent_asin", "title", "text"],
+                    "old_rule_removed_rows": old_removed,
+                    "old_rule_other_reviewer_rows": other_reviewer_rows,
+                    "independent_reviews_preserved": preserved,
+                },
                 "retained_rows": total - len(drop_rows),
                 "cross_product_text_groups": len(cross_texts),
                 "review_key_audit": dict(
@@ -608,9 +801,11 @@ def run(path, out_dir, chunksize=100000):
                     )
                 ),
                 "thresholds": limits,
+                "numeric_scaling": scaling,
                 "burst_threshold_per_utc_day": BURST_THRESHOLD,
                 "catalogue_rows": len(catalogue),
-                "language_method": "ASCII letter ratio plus stopword heuristic; no validated language detector",
+                "language_method": "ASCII letter ratio plus stopword heuristic; sampled langdetect reference, not ground truth",
+                "language_thresholds": LANGUAGE_THRESHOLDS,
                 "dataset_window": [str(WINDOW_START), str(WINDOW_END)],
                 "flag_counts": {},
             }
@@ -621,6 +816,7 @@ def run(path, out_dir, chunksize=100000):
                 "html_changed",
                 "normalisation_changed",
                 "dup_cross_product",
+                "dup_same_text_other_reviewer",
                 "repeated_review_key",
                 "length_outlier",
                 "helpful_outlier",
@@ -634,6 +830,8 @@ def run(path, out_dir, chunksize=100000):
                 "recall_false_friend",
                 "expired_return_window",
             ]
+            samples, populations = {}, {}
+            rng = np.random.default_rng(42)
             for chunk_no, file in enumerate(stage_files):
                 df = read(file)
                 df["exact_duplicate_removed"] = df["_row_id"].isin(drop_rows)
@@ -643,14 +841,26 @@ def run(path, out_dir, chunksize=100000):
                     "before_deduplication",
                 )
                 before = len(df)
-                df = remove_duplicates(df, drop_rows, cross_texts, repeated_keys)
+                df = remove_duplicates(
+                    df, drop_rows, cross_texts, repeated_keys, other_reviewers
+                )
                 record(
                     "duplicates",
                     before,
                     len(df),
                     before
                     - len(df)
-                    + int((df["dup_cross_product"] | df["repeated_review_key"]).sum()),
+                    + int(
+                        df[
+                            [
+                                "dup_cross_product",
+                                "repeated_review_key",
+                                "dup_same_text_other_reviewer",
+                            ]
+                        ]
+                        .any(axis=1)
+                        .sum()
+                    ),
                 )
                 df = flag_outliers(df, limits, burst_days)
                 record(
@@ -668,7 +878,10 @@ def run(path, out_dir, chunksize=100000):
                     .any(axis=1)
                     .sum(),
                 )
+                df = normalise_numeric(df, scaling)
+                record("numeric_normalisation", len(df), len(df), len(df))
                 df = identify_language(df)
+                _sample_language(df, samples, populations, rng)
                 record(
                     "language",
                     len(df),
@@ -721,6 +934,49 @@ def run(path, out_dir, chunksize=100000):
                     print(
                         f"Finalised chunk {chunk_no + 1}/{len(stage_files)}", flush=True
                     )
+            print("Validating a stratified language sample (seed 42)", flush=True)
+            agreement, validation = validate_language(samples, populations, 42)
+            validation["thresholds"] = LANGUAGE_THRESHOLDS
+            metrics["language_validation"] = [validation]
+            agreements = [agreement]
+            if validation["poor_agreement"]:
+                print(
+                    "Adjusting language thresholds once; fresh sample seed 43",
+                    flush=True,
+                )
+                metrics["language_thresholds"] = ADJUSTED_LANGUAGE_THRESHOLDS
+                samples, populations = {}, {}
+                rng = np.random.default_rng(43)
+                by_rating[:] = [
+                    r
+                    for r in by_rating
+                    if r["flag"] not in ("language_non_english", "language_unknown")
+                ]
+                for name in ("language_non_english", "language_unknown"):
+                    metrics["flag_counts"][name] = 0
+                log["language"].update(rows_in=0, rows_out=0, rows_flagged=0)
+                for file in sorted((work / "cleaned").iterdir()):
+                    df = identify_language(read(file), ADJUSTED_LANGUAGE_THRESHOLDS)
+                    _sample_language(df, samples, populations, rng)
+                    record(
+                        "language",
+                        len(df),
+                        len(df),
+                        df[["language_non_english", "language_unknown"]]
+                        .any(axis=1)
+                        .sum(),
+                    )
+                    tally(df, ["language_non_english", "language_unknown"], "retained")
+                    for name in ("language_non_english", "language_unknown"):
+                        metrics["flag_counts"][name] += int(df[name].sum())
+                    write(df, file)
+                agreement, validation = validate_language(samples, populations, 43)
+                validation["thresholds"] = ADJUSTED_LANGUAGE_THRESHOLDS
+                metrics["language_validation"].append(validation)
+                agreements.append(agreement)
+            pd.concat(agreements, ignore_index=True).to_csv(
+                work / "language_validation.csv", index=False
+            )
             ratings = (
                 pd.DataFrame(by_rating)
                 .groupby(["population", "rating", "flag"], as_index=False)[
@@ -733,14 +989,18 @@ def run(path, out_dir, chunksize=100000):
             pd.DataFrame(log.values()).to_csv(work / "cleaning_log.csv", index=False)
             metrics["elapsed_seconds"] = round(time.monotonic() - start, 2)
             metrics["fingerprints"] = [_fingerprint(path), _fingerprint(catalogue_path)]
-            metrics["versions"] = {"pandas": pd.__version__, "numpy": np.__version__}
+            metrics["versions"] = {
+                "pandas": pd.__version__,
+                "numpy": np.__version__,
+                "langdetect": "1.0.9",
+            }
             metrics["output_format"] = "parquet" if use_parquet else "csv.gz"
             metrics["chunksize"] = chunksize
             metrics["salt_policy"] = (
                 "CLEANING_SALT from environment; never written; same secret needed for same pseudonyms"
             )
             metrics["randomness"] = (
-                "No stochastic step or sampling; heuristic is deterministic"
+                "Deterministic heuristic; stratified random-priority sample seed 42, seed 43 after one threshold adjustment; DetectorFactory.seed=0"
             )
             (work / "cleaning_metrics.json").write_text(
                 json.dumps(metrics, indent=2) + "\n"
@@ -750,6 +1010,7 @@ def run(path, out_dir, chunksize=100000):
                 "cleaning_log.csv",
                 "cleaning_flag_by_rating.csv",
                 "cleaning_metrics.json",
+                "language_validation.csv",
             ):
                 os.replace(work / name, out_dir / name)
             print(
