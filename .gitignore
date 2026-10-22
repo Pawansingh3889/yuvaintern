@@ -18,3 +18,6 @@ docs/week_*/*.md
 
 # local copy of the report generator (npm docx); not published
 docs/week_02/_generator/
+
+# earlier recall-matching scoping notebook, kept locally only
+cosmetic_recall_analysis.ipynb
