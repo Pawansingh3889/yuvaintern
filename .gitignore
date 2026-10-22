@@ -18,3 +18,6 @@ docs/week_*/*.md
 
 # local copy of the report generator (npm docx); not published
 docs/week_02/_generator/
+docs/week_03/_generator/
+.pytest_cache/
+.ruff_cache/
