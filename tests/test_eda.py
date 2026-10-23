@@ -103,6 +103,80 @@ def test_catalogue_price_bands_boundaries_missing_and_invalid_data(tmp_path):
         eda.catalogue_price_bands(path)
 
 
+def test_data_quality_counts_missing_invalid_and_cross_partition_duplicates(tmp_path):
+    start, end = eda.WINDOW_START.value // 1000000, eda.WINDOW_END.value // 1000000
+    frame = pd.DataFrame(
+        {
+            "user_hash": ["u", "u", "v", "w", "x"],
+            "parent_asin": ["a", "a", "a", "b", "c"],
+            "title": ["same", "same", "same", "", None],
+            "text": ["same body", "same body", "same body", "  ", None],
+            "rating": [1, 1, 6, 0, None],
+            "timestamp": [start, start + 1, start - 1, end, None],
+            "helpful_vote": [0, 0, -1, 2, 0],
+            "catalogue_category": ["beauty", "beauty", "beauty", None, ""],
+            "catalogue_store": ["shop", "shop", "shop", " ", None],
+        }
+    )
+    paths = [tmp_path / "part-0.parquet", tmp_path / "part-1.parquet"]
+    frame.iloc[:1].to_parquet(paths[0], index=False)
+    frame.iloc[1:].to_parquet(paths[1], index=False)
+    result = eda.data_quality(paths, pd.Series({"a": "USD <10", "b": "<missing>"}))
+    indexed = result.set_index(["check", "column"])
+    assert indexed.loc["missing", "count"].to_dict() == {
+        "rating": 1,
+        "title": 2,
+        "text": 2,
+        "timestamp": 1,
+        "category": 2,
+        "store": 2,
+        "price": 2,
+    }
+    assert indexed.loc["invalid", "count"].to_dict() == {
+        "rating_outside_1_to_5": 2,
+        "timestamp_outside_window": 2,
+        "negative_helpful_votes": 1,
+    }
+    assert indexed.loc[("exact_duplicates", "week_3_key"), "count"] == 1
+    assert indexed.loc[("catalogue_join", "parent_asin_matched"), "share"] == 0.8
+    assert result.reviews.eq(5).all()
+    assert result["share"].eq(result["count"] / 5).all()
+    with pytest.raises(ValueError, match="No cleaned reviews"):
+        eda.data_quality([], pd.Series({"a": "USD <10"}))
+
+
+def test_svd_terms_filter_names_and_brands_before_ranking_loadings():
+    vocabulary = np.array(
+        [
+            "zephyrluxe",
+            "alicexyz",
+            "skin",
+            "hair",
+            "product",
+            "cream",
+            "rash",
+            "burned",
+            "my skin",
+            "dry",
+            "zephyrluxe cream",
+        ]
+    )
+    components = np.array([np.arange(11), np.arange(11)[::-1]], dtype=float)
+    result = eda.svd_terms(components, vocabulary)
+    assert result.groupby("component").size().tolist() == [8, 8]
+    assert (
+        result.groupby("component")
+        .loading.apply(lambda x: x.is_monotonic_decreasing)
+        .all()
+    )
+    assert not result.term.str.contains("zephyrluxe|alicexyz").any()
+    for row in result.itertuples(index=False):
+        assert (
+            row.loading
+            == components[row.component - 1, list(vocabulary).index(row.term)]
+        )
+
+
 def test_market_trends_pool_counts_keep_gaps_and_select_top_five():
     monthly = pd.DataFrame(
         {
@@ -205,3 +279,8 @@ def test_sample_analysis_covers_features_without_exporting_text():
     assert summary["relevance_proxy_positives"] > 0
     assert outputs["svd"].columns.tolist() == ["component_1", "component_2", "group"]
     assert len(summary["svd_explained_variance"]) == 2
+    assert outputs["svd_terms"].groupby("component").size().tolist() == [8, 8]
+    separation = outputs["svd_silhouette"]
+    assert separation.components.iloc[0] == 2
+    assert separation.silhouette.between(-1, 1).all()
+    assert separation.reviews.eq(len(sample.loc[sample.safety_cue])).all()

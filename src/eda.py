@@ -7,17 +7,22 @@ Text samples stay in memory; output files contain no review text or identifiers.
 import argparse
 from collections import Counter
 import gzip
+import hashlib
 import json
 from pathlib import Path
 import re
+import sqlite3
+import tempfile
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from scipy import stats
 from sklearn.decomposition import TruncatedSVD
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
+from sklearn.metrics import silhouette_score
 
+from src.cleaning import WINDOW_END, WINDOW_START
 from src import features as f
 
 
@@ -91,6 +96,134 @@ def catalogue_price_bands(path):
     if not prices:
         raise ValueError("Catalogue is empty")
     return pd.Series(prices, name="price_band")
+
+
+def data_quality(paths, price_bands):
+    """Audit retained rows with disk-backed, cross-partition duplicate keys."""
+    columns = {
+        "rating": "rating",
+        "title": "title",
+        "text": "text",
+        "timestamp": "timestamp",
+        "category": "catalogue_category",
+        "store": "catalogue_store",
+    }
+    missing, invalid = Counter(), Counter()
+    total = duplicates = matched = 0
+    with tempfile.TemporaryDirectory(prefix="eda-quality-") as temporary:
+        with sqlite3.connect(Path(temporary) / "keys.sqlite") as db:
+            db.execute("PRAGMA journal_mode=OFF")
+            db.execute("PRAGMA synchronous=OFF")
+            db.execute("PRAGMA cache_size=-65536")
+            db.execute("PRAGMA mmap_size=2147483648")
+            db.execute("CREATE TABLE keys (digest BLOB PRIMARY KEY) WITHOUT ROWID")
+            for i, path in enumerate(paths):
+                df = pq.read_table(
+                    path,
+                    columns=list(columns.values())
+                    + ["user_hash", "parent_asin", "helpful_vote"],
+                ).to_pandas()
+                total += len(df)
+                for name, column in columns.items():
+                    values = df[column]
+                    absent = values.isna()
+                    if pd.api.types.is_string_dtype(values):
+                        absent |= values.str.strip().eq("").fillna(False)
+                    missing[name] += int(absent.sum())
+                bands = df.parent_asin.map(price_bands)
+                missing["price"] += int((bands.isna() | bands.eq("<missing>")).sum())
+                matched += int(bands.notna().sum())
+                invalid["rating_outside_1_to_5"] += int(
+                    (df.rating.notna() & ~df.rating.between(1, 5)).sum()
+                )
+                dates = pd.to_datetime(
+                    df.timestamp, unit="ms", utc=True, errors="coerce"
+                )
+                invalid["timestamp_outside_window"] += int(
+                    (
+                        df.timestamp.notna()
+                        & (dates.isna() | dates.lt(WINDOW_START) | dates.ge(WINDOW_END))
+                    ).sum()
+                )
+                invalid["negative_helpful_votes"] += int(df.helpful_vote.lt(0).sum())
+                if df[["user_hash", "parent_asin"]].isna().any().any():
+                    raise ValueError(
+                        "Duplicate audit requires reviewer and product keys"
+                    )
+                # The retained reviewer hash preserves the Week 3 identity key.
+                keys = df[["user_hash", "parent_asin", "title", "text"]]
+                keys = keys.astype(object).where(keys.notna(), None)
+                before = db.total_changes
+                db.executemany(
+                    "INSERT OR IGNORE INTO keys VALUES (?)",
+                    sorted(
+                        (
+                            hashlib.sha256(
+                                json.dumps(
+                                    row, ensure_ascii=False, separators=(",", ":")
+                                ).encode()
+                            ).digest(),
+                        )
+                        for row in keys.itertuples(index=False, name=None)
+                    ),
+                )
+                duplicates += len(df) - (db.total_changes - before)
+                db.commit()
+                if (i + 1) % 20 == 0 or i + 1 == len(paths):
+                    print(
+                        f"Quality partitions {i + 1}/{len(paths)}; reviews {total:,}",
+                        flush=True,
+                    )
+    if not total:
+        raise ValueError("No cleaned reviews found for data quality")
+    rows = [
+        {"check": "missing", "column": name, "count": count}
+        for name, count in missing.items()
+    ]
+    rows += [
+        {"check": "invalid", "column": name, "count": count}
+        for name, count in invalid.items()
+    ]
+    rows += [
+        {"check": "exact_duplicates", "column": "week_3_key", "count": duplicates},
+        {"check": "catalogue_join", "column": "parent_asin_matched", "count": matched},
+    ]
+    result = pd.DataFrame(rows)
+    result["reviews"] = total
+    result["share"] = result["count"] / total
+    return result
+
+
+def svd_terms(components, vocabulary):
+    """Expose loadings only for screened generic words, never names or brands."""
+    generic = ENGLISH_STOP_WORDS | set(
+        "skin hair scalp eyes face lips product cream oil shampoo conditioner lotion "
+        "use used using dry soft smell scent irritation irritated burn burned burning "
+        "rash itchy itching reaction bottle body bought good great love works feel "
+        "felt sensitive soap wash moisturizer allergic infection rancid mold expired "
+        "contamination swelling swollen hives blister packaging my just really like".split()
+    )
+    allowed = [
+        i
+        for i, term in enumerate(vocabulary)
+        if all(word in generic for word in term.split())
+    ]
+    if len(allowed) < 8:
+        raise ValueError("SVD term export requires eight screened generic terms")
+    return pd.DataFrame(
+        [
+            {
+                "component": component + 1,
+                "rank": rank + 1,
+                "term": vocabulary[index],
+                "loading": float(loadings[index]),
+            }
+            for component, loadings in enumerate(components)
+            for rank, index in enumerate(
+                sorted(allowed, key=lambda i: loadings[i], reverse=True)[:8]
+            )
+        ]
+    )
 
 
 def market_trends(monthly, category, category_year, price_band):
@@ -378,6 +511,29 @@ def sample_analysis(sample, cue_sample, scaling, rating):
     coordinates = svd.fit_transform(matrix)
     group_counts = cue_sample[[f"{name}_count" for name in f.WORD_GROUPS]]
     dominant = group_counts.idxmax(axis=1).str.removesuffix("_count")
+    terms = svd_terms(svd.components_, vectorizer.get_feature_names_out())
+    separation = []
+    if 1 < dominant.nunique() < len(dominant):
+        for dimensions in (2, 50, 100):
+            if dimensions >= min(matrix.shape):
+                continue
+            embedding = (
+                coordinates
+                if dimensions == 2
+                else TruncatedSVD(
+                    n_components=dimensions, random_state=SEED
+                ).fit_transform(matrix)
+            )
+            score = silhouette_score(embedding, dominant)
+            separation.append(
+                {
+                    "components": dimensions,
+                    "silhouette": float(score),
+                    "reviews": len(cue_sample),
+                    "sample_seed": SEED + 1,
+                }
+            )
+            print(f"SVD {dimensions} components; silhouette {score:.6f}", flush=True)
     projection = pd.DataFrame(
         {
             "component_1": coordinates[:, 0],
@@ -422,6 +578,10 @@ def sample_analysis(sample, cue_sample, scaling, rating):
         "feature_relevance": relevance,
         "spearman": spearman,
         "svd": projection,
+        "svd_terms": terms,
+        "svd_silhouette": pd.DataFrame(
+            separation, columns=["components", "silhouette", "reviews", "sample_seed"]
+        ),
     }, summaries
 
 
@@ -430,9 +590,12 @@ def run(input_dir, output_dir, metrics_path, catalogue_path):
     if not paths:
         raise FileNotFoundError(f"No cleaned parquet partitions in {input_dir}")
     metrics = json.loads(Path(metrics_path).read_text())
-    outputs, sample, cue_sample = aggregate_partitions(
-        paths, catalogue_price_bands(catalogue_path)
-    )
+    price_bands = catalogue_price_bands(catalogue_path)
+    quality = data_quality(paths, price_bands)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    quality.to_csv(output_dir / "data_quality.csv", index=False)
+    outputs, sample, cue_sample = aggregate_partitions(paths, price_bands)
     outputs.update(
         market_trends(
             outputs["monthly"],
@@ -444,6 +607,8 @@ def run(input_dir, output_dir, metrics_path, catalogue_path):
     rows = int(outputs["rating"].reviews.sum())
     if rows != metrics["retained_rows"]:
         raise ValueError("EDA population does not reconcile with cleaning metrics")
+    if not quality.reviews.eq(rows).all():
+        raise ValueError("Quality audit population does not reconcile with EDA")
     extra, summary = sample_analysis(
         sample, cue_sample, metrics["numeric_scaling"], outputs["rating"]
     )
@@ -459,8 +624,6 @@ def run(input_dir, output_dir, metrics_path, catalogue_path):
             "catalogue_timing": "Snapshot metadata lacks effective dates; context requires historical metadata before predictive use",
         }
     )
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     for name, table in {**outputs, **extra}.items():
         table.to_csv(output_dir / f"{name}.csv", index=name == "spearman")
     (output_dir / "summary.json").write_text(
